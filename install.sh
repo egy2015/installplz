@@ -26,6 +26,8 @@ installplz installed successfully!
 
 Try:
   installplz app.deb
+  installplz app.rpm
+  installplz app.pkg.tar.zst
   installplz app.AppImage
   installplz installer.sh
   installplz source.tar.gz

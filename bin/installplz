@@ -4,7 +4,7 @@ set -euo pipefail
 show_file_types() {
     cat <<'EOF'
 Supported file types:
-  .deb .AppImage .sh .run .bin
+  .deb .rpm .pkg.tar.zst .AppImage .sh .run .bin
   .tar.gz .tgz .tar.xz .tar.bz2 .zip
 EOF
 }
@@ -19,6 +19,7 @@ Supported archive installer detectors (in order):
   Makefile or makefile
   package.json
   Cargo.toml
+  DEBS/*.deb or RPMS/*.rpm
 EOF
 }
 
@@ -28,6 +29,8 @@ Usage: installplz <file_name>
 
 Examples:
   installplz app.deb
+  installplz app.rpm
+  installplz app.pkg.tar.zst
   installplz app.AppImage
   installplz installer.sh
   installplz source.tar.gz
@@ -53,7 +56,50 @@ die() {
 }
 
 require_command() {
-    command -v "$1" >/dev/null 2>&1 || die "Required command not found: $1"
+    command -v "$1" >/dev/null 2>&1 || { echo "Error: Required command not found: $1" >&2; return 1; }
+}
+
+os_has() {
+    [[ " ${ID:-} ${ID_LIKE:-} " == *" $1 "* ]]
+}
+
+install_native_packages() {
+    local format=$1
+    shift
+    [[ -r /etc/os-release ]] || { echo "Error: Cannot detect Linux distribution: /etc/os-release is missing" >&2; return 1; }
+    # shellcheck disable=SC1091
+    source /etc/os-release
+
+    case $format in
+        deb)
+            os_has debian || { echo "Error: This is ${PRETTY_NAME:-an unsupported distribution}; download its native package instead of .deb" >&2; return 1; }
+            require_command apt || return
+            sudo apt install "$@"
+            ;;
+        rpm)
+            if os_has suse || os_has opensuse; then
+                require_command zypper || return
+                sudo zypper install "$@"
+            elif os_has fedora || os_has rhel || os_has centos; then
+                if command -v dnf >/dev/null 2>&1; then
+                    sudo dnf install "$@"
+                elif command -v yum >/dev/null 2>&1; then
+                    sudo yum install "$@"
+                else
+                    echo "Error: No RPM package manager found; expected dnf or yum" >&2
+                    return 1
+                fi
+            else
+                echo "Error: This is ${PRETTY_NAME:-an unsupported distribution}; download its native package instead of .rpm" >&2
+                return 1
+            fi
+            ;;
+        arch)
+            os_has arch || { echo "Error: This is ${PRETTY_NAME:-an unsupported distribution}; download its native package instead of .pkg.tar.zst" >&2; return 1; }
+            require_command pacman || return
+            sudo pacman -U "$@"
+            ;;
+    esac
 }
 
 run_script() {
@@ -85,10 +131,10 @@ archive_folder() {
 extract_archive() {
     local file=$1 target=$2
     case $file in
-        *.tar.gz|*.tgz) require_command tar; tar -xzf "$file" -C "$target" ;;
-        *.tar.xz) require_command tar; tar -xJf "$file" -C "$target" ;;
-        *.tar.bz2) require_command tar; tar -xjf "$file" -C "$target" ;;
-        *.zip) require_command unzip; unzip -q "$file" -d "$target" ;;
+        *.tar.gz|*.tgz) require_command tar && tar -xzf "$file" -C "$target" ;;
+        *.tar.xz) require_command tar && tar -xJf "$file" -C "$target" ;;
+        *.tar.bz2) require_command tar && tar -xjf "$file" -C "$target" ;;
+        *.zip) require_command unzip && unzip -q "$file" -d "$target" ;;
     esac
 }
 
@@ -105,36 +151,27 @@ enter_source_root() {
 }
 
 install_archive_contents() {
+    local packages
     if [[ -f install.sh ]]; then
-        chmod +x install.sh
-        ./install.sh
+        chmod +x install.sh && ./install.sh
     elif [[ -f configure ]]; then
-        require_command make
-        chmod +x configure
-        ./configure
-        make
-        sudo make install
+        require_command make && chmod +x configure && ./configure && make && sudo make install
     elif [[ -f CMakeLists.txt ]]; then
-        require_command cmake
-        require_command make
-        cmake .
-        make
-        sudo make install
+        require_command cmake && require_command make && cmake . && make && sudo make install
     elif [[ -f meson.build ]]; then
-        require_command meson
-        meson setup build
-        meson compile -C build
-        sudo meson install -C build
+        require_command meson && meson setup build && meson compile -C build && sudo meson install -C build
     elif [[ -f Makefile || -f makefile ]]; then
-        require_command make
-        make
-        sudo make install
+        require_command make && make && sudo make install
     elif [[ -f package.json ]]; then
-        require_command npm
-        npm install
+        require_command npm && npm install
     elif [[ -f Cargo.toml ]]; then
-        require_command cargo
-        cargo install --path .
+        require_command cargo && cargo install --path .
+    elif compgen -G 'DEBS/*.deb' >/dev/null; then
+        packages=(./DEBS/*.deb)
+        install_native_packages deb "${packages[@]}"
+    elif compgen -G 'RPMS/*.rpm' >/dev/null; then
+        packages=(./RPMS/*.rpm)
+        install_native_packages rpm "${packages[@]}"
     else
         echo "Error: No supported installer found in the extracted archive." >&2
         show_detectors >&2
@@ -142,16 +179,49 @@ install_archive_contents() {
     fi
 }
 
+handle_archive_failure() {
+    local target=$1 answer
+    local -a docs
+    mapfile -t docs < <(find "$target" -maxdepth 3 \( -type f \( -iname 'README*' -o -iname 'INSTALL*' \) -o -type d -iname docs \) -print)
+
+    echo "Installation was not completed."
+    echo "Extracted files: $target"
+    if [[ ${#docs[@]} -gt 0 ]]; then
+        echo "Possible installation documentation:"
+        printf '  %s\n' "${docs[@]}"
+    fi
+
+    printf 'Delete extracted files? (yes/no): '
+    IFS= read -r answer || answer=no
+    if [[ $answer == yes ]]; then
+        rm -rf -- "$target"
+        echo "Extracted files deleted. The original archive was kept."
+    else
+        echo "Extracted files kept for inspection."
+    fi
+}
+
 install_archive() {
-    local file=$1 parent folder target
+    local file=$1 parent folder target status
     parent=$(cd "$(dirname "$file")" && pwd)
     folder=$(archive_folder "$file")
     target="$parent/$folder"
     [[ ! -e $target ]] || die "Extraction folder already exists: $target"
     mkdir "$target"
-    extract_archive "$file" "$target"
+    if ! extract_archive "$file" "$target"; then
+        cd "$parent"
+        handle_archive_failure "$target"
+        return 1
+    fi
     enter_source_root "$target"
-    install_archive_contents
+    if install_archive_contents; then
+        return
+    else
+        status=$?
+        cd "$parent"
+        handle_archive_failure "$target"
+        return "$status"
+    fi
 }
 
 [[ $# -eq 1 ]] || { show_help; exit 1; }
@@ -168,7 +238,17 @@ case $file in
     *.deb)
         directory=$(cd "$(dirname "$file")" && pwd)
         basename=$(basename "$file")
-        (cd "$directory" && sudo apt install "./$basename")
+        (cd "$directory" && install_native_packages deb "./$basename")
+        ;;
+    *.rpm)
+        directory=$(cd "$(dirname "$file")" && pwd)
+        basename=$(basename "$file")
+        (cd "$directory" && install_native_packages rpm "./$basename")
+        ;;
+    *.pkg.tar.zst)
+        directory=$(cd "$(dirname "$file")" && pwd)
+        basename=$(basename "$file")
+        (cd "$directory" && install_native_packages arch "./$basename")
         ;;
     *.AppImage)
         basename=$(basename "$file")

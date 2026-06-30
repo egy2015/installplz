@@ -15,6 +15,8 @@ chmod +x install.sh
 
 ```bash
 installplz app.deb
+installplz app.rpm
+installplz app.pkg.tar.zst
 installplz app.AppImage
 installplz installer.sh
 installplz source.tar.gz
@@ -23,7 +25,9 @@ installplz source.tar.xz
 installplz source.zip
 ```
 
-Supported file types: `.deb`, `.AppImage`, `.sh`, `.run`, `.bin`, `.tar.gz`, `.tgz`, `.tar.xz`, `.tar.bz2`, and `.zip`.
+Supported file types: `.deb`, `.rpm`, `.pkg.tar.zst`, `.AppImage`, `.sh`, `.run`, `.bin`, `.tar.gz`, `.tgz`, `.tar.xz`, `.tar.bz2`, and `.zip`.
+
+Native packages are checked against `/etc/os-release` before installation: APT for Debian-based systems, DNF/YUM/Zypper for RPM-based systems, and Pacman for Arch Linux. A mismatched package stops with an error instead of forcing installation.
 
 For archives, `installplz` extracts into a new folder and looks for these installers in order:
 
@@ -34,6 +38,9 @@ For archives, `installplz` extracts into a new folder and looks for these instal
 5. `Makefile` or `makefile` (`make`, then `sudo make install`)
 6. `package.json` (`npm install`)
 7. `Cargo.toml` (`cargo install --path .`)
+8. `DEBS/*.deb` or `RPMS/*.rpm` package bundles
+
+If extraction or installation fails, `installplz` prints the extraction path and any nearby `README*`, `INSTALL*`, or `docs/` entries. It keeps the files by default and deletes them only when you type exactly `yes`.
 
 ## Security
 
@@ -51,7 +58,7 @@ Uninstalling backs up `.bashrc`, removes only the block marked by `installplz`, 
 ## Limitations
 
 - Linux and Bash only; shell configuration is limited to `~/.bashrc`.
-- Package managers other than APT are not supported for `.deb` files.
+- Native package support is limited to Debian-based, RPM-based, and Arch Linux distributions.
 - Archive installation depends on the tools required by the detected project, such as `make`, `cmake`, `meson`, `npm`, or `cargo`.
 - Installers inside archives must be at the archive root or its single top-level directory.
 
