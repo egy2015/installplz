@@ -1,0 +1,187 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+show_file_types() {
+    cat <<'EOF'
+Supported file types:
+  .deb .AppImage .sh .run .bin
+  .tar.gz .tgz .tar.xz .tar.bz2 .zip
+EOF
+}
+
+show_detectors() {
+    cat <<'EOF'
+Supported archive installer detectors (in order):
+  install.sh
+  configure
+  CMakeLists.txt
+  meson.build
+  Makefile or makefile
+  package.json
+  Cargo.toml
+EOF
+}
+
+show_help() {
+    cat <<'EOF'
+Usage: installplz <file_name>
+
+Examples:
+  installplz app.deb
+  installplz app.AppImage
+  installplz installer.sh
+  installplz source.tar.gz
+  installplz source.tgz
+  installplz source.tar.xz
+  installplz source.zip
+
+EOF
+    show_file_types
+    echo
+    show_detectors
+    cat <<'EOF'
+
+Security warning:
+  Inspect .sh, .run, and .bin files before running them. They can execute
+  arbitrary commands. installplz runs them only after you type exactly "yes".
+EOF
+}
+
+die() {
+    echo "Error: $*" >&2
+    exit 1
+}
+
+require_command() {
+    command -v "$1" >/dev/null 2>&1 || die "Required command not found: $1"
+}
+
+run_script() {
+    local file=$1 directory basename answer
+    directory=$(cd "$(dirname "$file")" && pwd)
+    basename=$(basename "$file")
+    chmod +x "$file"
+    printf 'This script will be executed. Continue? (yes/no): '
+    IFS= read -r answer || answer=no
+    if [[ $answer != yes ]]; then
+        echo "Cancelled."
+        return
+    fi
+    (cd "$directory" && "./$basename")
+}
+
+archive_folder() {
+    local name
+    name=$(basename "$1")
+    case $name in
+        *.tar.gz) echo "${name%.tar.gz}" ;;
+        *.tar.xz) echo "${name%.tar.xz}" ;;
+        *.tar.bz2) echo "${name%.tar.bz2}" ;;
+        *.tgz) echo "${name%.tgz}" ;;
+        *.zip) echo "${name%.zip}" ;;
+    esac
+}
+
+extract_archive() {
+    local file=$1 target=$2
+    case $file in
+        *.tar.gz|*.tgz) require_command tar; tar -xzf "$file" -C "$target" ;;
+        *.tar.xz) require_command tar; tar -xJf "$file" -C "$target" ;;
+        *.tar.bz2) require_command tar; tar -xjf "$file" -C "$target" ;;
+        *.zip) require_command unzip; unzip -q "$file" -d "$target" ;;
+    esac
+}
+
+enter_source_root() {
+    local directory=$1 entries
+    shopt -s nullglob dotglob
+    entries=("$directory"/*)
+    shopt -u nullglob dotglob
+    if [[ ${#entries[@]} -eq 1 && -d ${entries[0]} ]]; then
+        cd "${entries[0]}"
+    else
+        cd "$directory"
+    fi
+}
+
+install_archive_contents() {
+    if [[ -f install.sh ]]; then
+        chmod +x install.sh
+        ./install.sh
+    elif [[ -f configure ]]; then
+        require_command make
+        chmod +x configure
+        ./configure
+        make
+        sudo make install
+    elif [[ -f CMakeLists.txt ]]; then
+        require_command cmake
+        require_command make
+        cmake .
+        make
+        sudo make install
+    elif [[ -f meson.build ]]; then
+        require_command meson
+        meson setup build
+        meson compile -C build
+        sudo meson install -C build
+    elif [[ -f Makefile || -f makefile ]]; then
+        require_command make
+        make
+        sudo make install
+    elif [[ -f package.json ]]; then
+        require_command npm
+        npm install
+    elif [[ -f Cargo.toml ]]; then
+        require_command cargo
+        cargo install --path .
+    else
+        echo "Error: No supported installer found in the extracted archive." >&2
+        show_detectors >&2
+        return 1
+    fi
+}
+
+install_archive() {
+    local file=$1 parent folder target
+    parent=$(cd "$(dirname "$file")" && pwd)
+    folder=$(archive_folder "$file")
+    target="$parent/$folder"
+    [[ ! -e $target ]] || die "Extraction folder already exists: $target"
+    mkdir "$target"
+    extract_archive "$file" "$target"
+    enter_source_root "$target"
+    install_archive_contents
+}
+
+[[ $# -eq 1 ]] || { show_help; exit 1; }
+
+case $1 in
+    -h|--help) show_help; exit 0 ;;
+esac
+
+file=$1
+[[ -e $file ]] || die "File not found: $file"
+[[ -f $file ]] || die "Not a regular file: $file"
+
+case $file in
+    *.deb)
+        directory=$(cd "$(dirname "$file")" && pwd)
+        basename=$(basename "$file")
+        (cd "$directory" && sudo apt install "./$basename")
+        ;;
+    *.AppImage)
+        basename=$(basename "$file")
+        mkdir -p "$HOME/.local/bin"
+        chmod +x "$file"
+        mv "$file" "$HOME/.local/bin/$basename"
+        echo "Installed. Run it with: $basename"
+        ;;
+    *.sh|*.run|*.bin) run_script "$file" ;;
+    *.tar.gz|*.tgz|*.tar.xz|*.tar.bz2|*.zip) install_archive "$file" ;;
+    *)
+        echo "Unsupported file type" >&2
+        show_file_types >&2
+        exit 1
+        ;;
+esac
